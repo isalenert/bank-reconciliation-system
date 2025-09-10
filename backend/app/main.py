@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, Form  # ← Form adicionado
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
@@ -6,6 +6,7 @@ import tempfile
 import os
 from app.core.csv_processor import CSVProcessor
 from app.core.pdf_processor import PDFProcessor
+from app.core.reconciliation_processor import ReconciliationProcessor  # ← Nova importação
 
 app = FastAPI(
     title="Sistema de Conciliação Bancária",
@@ -92,6 +93,89 @@ async def upload_pdf(file: UploadFile = File(...)):
             {"error": f"Erro ao processar PDF: {str(e)}"},
             status_code=500
         )
+
+@app.post("/reconcile")
+async def reconcile_transactions(
+    bank_file: UploadFile = File(...),
+    internal_file: UploadFile = File(...),
+    date_col: str = Form("Data"),
+    value_col: str = Form("Valor"),
+    desc_col: str = Form("Descricao"),
+    id_col: str = Form(None),
+    date_tolerance: int = Form(1),
+    value_tolerance: float = Form(0.01),
+    similarity_threshold: float = Form(0.8)
+):
+    """Endpoint para conciliação de transações"""
+    try:
+        print(f"🔍 Iniciando conciliação...")
+        print(f"📋 Config: date_col={date_col}, value_col={value_col}, desc_col={desc_col}, id_col={id_col}")
+        
+        # Processar arquivo do banco
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp_bank:
+            content = await bank_file.read()
+            tmp_bank.write(content)
+            tmp_bank_path = tmp_bank.name
+        
+        bank_processor = CSVProcessor()
+        bank_df = bank_processor.read_csv(tmp_bank_path)
+        print(f"📊 Banco: {len(bank_df)} transações")
+        bank_df_clean = bank_processor.standardize_data(bank_df)
+        print(f"✅ Banco processado: {len(bank_df_clean)} transações")
+        
+        # Processar arquivo interno
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp_internal:
+            content = await internal_file.read()
+            tmp_internal.write(content)
+            tmp_internal_path = tmp_internal.name
+        
+        internal_processor = CSVProcessor()
+        internal_df = internal_processor.read_csv(tmp_internal_path)
+        print(f"📊 Sistema: {len(internal_df)} transações")
+        internal_df_clean = internal_processor.standardize_data(internal_df)
+        print(f"✅ Sistema processado: {len(internal_df_clean)} transações")
+        
+        # Limpar arquivos temporários
+        os.unlink(tmp_bank_path)
+        os.unlink(tmp_internal_path)
+        
+        # Verificar se os DataFrames não estão vazios
+        if bank_df_clean.empty:
+            raise ValueError("DataFrame do banco está vazio após processamento")
+        if internal_df_clean.empty:
+            raise ValueError("DataFrame do sistema interno está vazio após processamento")
+        
+        # Configurar processador de conciliação
+        processor = ReconciliationProcessor(
+            date_tolerance_days=date_tolerance,
+            value_tolerance=value_tolerance,
+            similarity_threshold=similarity_threshold
+        )
+        
+        config = {
+            'date_col': date_col,
+            'value_col': value_col,
+            'desc_col': desc_col,
+            'id_col': id_col if id_col else None
+        }
+        
+        print(f"🔧 Executando algoritmo de conciliação...")
+        # Executar conciliação
+        results = processor.reconcile(bank_df_clean, internal_df_clean, config)
+        
+        print(f"🎯 Conciliação concluída: {results['summary']['matched_count']} matches")
+        return JSONResponse(results)
+        
+    except Exception as e:
+        print(f"❌ ERRO na conciliação: {str(e)}")
+        import traceback
+        traceback.print_exc()  # Isso mostrará o traceback completo no terminal
+        
+        return JSONResponse(
+            {"error": f"Erro na conciliação: {str(e)}"},
+            status_code=500
+        )
+
 
 if __name__ == "__main__":
     import uvicorn

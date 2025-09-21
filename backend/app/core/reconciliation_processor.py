@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Tuple, Any
 from datetime import datetime, timedelta
 from fuzzywuzzy import fuzz
 import Levenshtein
@@ -98,9 +97,6 @@ class ReconciliationProcessor:
         print(f"🔍 [DEBUG] Iniciando reconciliação...")
         print(f"📊 [DEBUG] Bank DF shape: {bank_df.shape}")
         print(f"📊 [DEBUG] Internal DF shape: {internal_df.shape}")
-        print(f"📋 [DEBUG] Bank columns: {list(bank_df.columns)}")
-        print(f"📋 [DEBUG] Internal columns: {list(internal_df.columns)}")
-        print(f"⚙️ [DEBUG] Config: {config}")
         
         # Extrair configurações
         date_col = config.get('date_col', 'Data')
@@ -130,14 +126,18 @@ class ReconciliationProcessor:
             bank_df, internal_df, date_col, value_col, desc_col, id_col
         )
         
-        print(f"📊 [DEBUG] Bank DF normalizado shape: {bank_df_norm.shape}")
-        print(f"📊 [DEBUG] Internal DF normalizado shape: {internal_df_norm.shape}")
-        
         results = {
             'matched': [],
             'bank_only': [],
             'internal_only': [],
-            'discrepancies': []
+            'summary': {
+                'total_bank_transactions': len(bank_df_norm),
+                'total_internal_transactions': len(internal_df_norm),
+                'matched_count': 0,
+                'bank_only_count': 0,
+                'internal_only_count': 0,
+                'match_rate': 0
+            }
         }
         
         # Etapa 1: Pareamento por ID (se disponível)
@@ -198,21 +198,14 @@ class ReconciliationProcessor:
         results['matched'] = all_matches
         results['bank_only'] = self._convert_timestamps(bank_only.to_dict('records'))
         results['internal_only'] = self._convert_timestamps(internal_only.to_dict('records'))
-        results['summary'] = {
-            'total_bank_transactions': len(bank_df_norm),
-            'total_internal_transactions': len(internal_df_norm),
-            'matched_count': len(all_matches),
-            'bank_only_count': len(bank_only),
-            'internal_only_count': len(internal_only),
-            'match_rate': len(all_matches) / max(len(bank_df_norm), len(internal_df_norm), 1)
-        }
+        
+        # Atualizar summary
+        results['summary']['matched_count'] = len(all_matches)
+        results['summary']['bank_only_count'] = len(bank_only)
+        results['summary']['internal_only_count'] = len(internal_only)
+        results['summary']['match_rate'] = len(all_matches) / max(len(bank_df_norm), len(internal_df_norm), 1)
         
         print(f"✅ [DEBUG] Reconciliação concluída!")
         print(f"📈 [DEBUG] Resultados: {results['summary']}")
         
         return results
-
-# Teste básico
-if __name__ == "__main__":
-    processor = ReconciliationProcessor()
-    print("✅ ReconciliationProcessor criado com sucesso!")

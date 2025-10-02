@@ -1,15 +1,28 @@
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Tuple
 from datetime import datetime, timedelta
 from fuzzywuzzy import fuzz
 import Levenshtein
+import json
+from typing import Dict, List, Tuple, Any
 
 class ReconciliationProcessor:
     def __init__(self, date_tolerance_days: int = 1, value_tolerance: float = 0.01, similarity_threshold: float = 0.8):
         self.date_tolerance_days = date_tolerance_days
         self.value_tolerance = value_tolerance
         self.similarity_threshold = similarity_threshold
+    
+    def _convert_timestamps(self, obj: Any) -> Any:
+        """Converte objetos Timestamp para string para serialização JSON"""
+        if isinstance(obj, pd.Timestamp):
+            return obj.strftime('%Y-%m-%d')
+        elif isinstance(obj, pd.Series):
+            return obj.astype(str).tolist()
+        elif isinstance(obj, dict):
+            return {k: self._convert_timestamps(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._convert_timestamps(item) for item in obj]
+        return obj
     
     def _normalize_dataframes(self, df1: pd.DataFrame, df2: pd.DataFrame, 
                             date_col: str, value_col: str, desc_col: str, id_col: str = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -70,8 +83,8 @@ class ReconciliationProcessor:
                 similarity = self._calculate_similarity(bank_desc, internal_row[desc_col])
                 if similarity >= self.similarity_threshold:
                     match = {
-                        'bank_transaction': bank_row.to_dict(),
-                        'internal_transaction': internal_row.to_dict(),
+                        'bank_transaction': self._convert_timestamps(bank_row.to_dict()),
+                        'internal_transaction': self._convert_timestamps(internal_row.to_dict()),
                         'similarity_score': similarity,
                         'match_type': 'fuzzy'
                     }
@@ -85,9 +98,6 @@ class ReconciliationProcessor:
         print(f"🔍 [DEBUG] Iniciando reconciliação...")
         print(f"📊 [DEBUG] Bank DF shape: {bank_df.shape}")
         print(f"📊 [DEBUG] Internal DF shape: {internal_df.shape}")
-        print(f"📋 [DEBUG] Bank columns: {list(bank_df.columns)}")
-        print(f"📋 [DEBUG] Internal columns: {list(internal_df.columns)}")
-        print(f"⚙️ [DEBUG] Config: {config}")
         
         # Extrair configurações
         date_col = config.get('date_col', 'Data')
@@ -98,35 +108,17 @@ class ReconciliationProcessor:
         print(f"📝 [DEBUG] Colunas identificadas: date={date_col}, value={value_col}, desc={desc_col}, id={id_col}")
         
         # Verificar se as colunas existem nos DataFrames
-        if date_col not in bank_df.columns:
-            error_msg = f"Coluna de data '{date_col}' não encontrada no arquivo do banco. Colunas disponíveis: {list(bank_df.columns)}"
-            print(f"❌ [ERROR] {error_msg}")
-            raise ValueError(error_msg)
-        
-        if date_col not in internal_df.columns:
-            error_msg = f"Coluna de data '{date_col}' não encontrada no arquivo interno. Colunas disponíveis: {list(internal_df.columns)}"
-            print(f"❌ [ERROR] {error_msg}")
-            raise ValueError(error_msg)
-        
-        if value_col not in bank_df.columns:
-            error_msg = f"Coluna de valor '{value_col}' não encontrada no arquivo do banco. Colunas disponíveis: {list(bank_df.columns)}"
-            print(f"❌ [ERROR] {error_msg}")
-            raise ValueError(error_msg)
-        
-        if value_col not in internal_df.columns:
-            error_msg = f"Coluna de valor '{value_col}' não encontrada no arquivo interno. Colunas disponíveis: {list(internal_df.columns)}"
-            print(f"❌ [ERROR] {error_msg}")
-            raise ValueError(error_msg)
-        
-        if desc_col not in bank_df.columns:
-            error_msg = f"Coluna de descrição '{desc_col}' não encontrada no arquivo do banco. Colunas disponíveis: {list(bank_df.columns)}"
-            print(f"❌ [ERROR] {error_msg}")
-            raise ValueError(error_msg)
-        
-        if desc_col not in internal_df.columns:
-            error_msg = f"Coluna de descrição '{desc_col}' não encontrada no arquivo interno. Colunas disponíveis: {list(internal_df.columns)}"
-            print(f"❌ [ERROR] {error_msg}")
-            raise ValueError(error_msg)
+        required_cols = [date_col, value_col, desc_col]
+        for col in required_cols:
+            if col not in bank_df.columns:
+                error_msg = f"Coluna '{col}' não encontrada no arquivo do banco. Colunas disponíveis: {list(bank_df.columns)}"
+                print(f"❌ [ERROR] {error_msg}")
+                raise ValueError(error_msg)
+            
+            if col not in internal_df.columns:
+                error_msg = f"Coluna '{col}' não encontrada no arquivo interno. Colunas disponíveis: {list(internal_df.columns)}"
+                print(f"❌ [ERROR] {error_msg}")
+                raise ValueError(error_msg)
         
         print(f"✅ [DEBUG] Todas as colunas necessárias encontradas!")
         
@@ -135,14 +127,18 @@ class ReconciliationProcessor:
             bank_df, internal_df, date_col, value_col, desc_col, id_col
         )
         
-        print(f"📊 [DEBUG] Bank DF normalizado shape: {bank_df_norm.shape}")
-        print(f"📊 [DEBUG] Internal DF normalizado shape: {internal_df_norm.shape}")
-        
         results = {
             'matched': [],
             'bank_only': [],
             'internal_only': [],
-            'discrepancies': []
+            'summary': {
+                'total_bank_transactions': len(bank_df_norm),
+                'total_internal_transactions': len(internal_df_norm),
+                'matched_count': 0,
+                'bank_only_count': 0,
+                'internal_only_count': 0,
+                'match_rate': 0
+            }
         }
         
         # Etapa 1: Pareamento por ID (se disponível)
@@ -168,8 +164,12 @@ class ReconciliationProcessor:
         if not id_matches.empty:
             for _, row in id_matches.iterrows():
                 match = {
-                    'bank_transaction': row[[c for c in row.index if c.endswith('_bank') or c == id_col]].to_dict(),
-                    'internal_transaction': row[[c for c in row.index if c.endswith('_internal') or c == id_col]].to_dict(),
+                    'bank_transaction': self._convert_timestamps(
+                        {k: v for k, v in row.items() if k.endswith('_bank') or k == id_col}
+                    ),
+                    'internal_transaction': self._convert_timestamps(
+                        {k: v for k, v in row.items() if k.endswith('_internal') or k == id_col}
+                    ),
                     'similarity_score': 1.0,
                     'match_type': 'exact_id'
                 }
@@ -182,35 +182,31 @@ class ReconciliationProcessor:
         matched_internal_ids = set()
         
         for match in all_matches:
-            if 'index' in match['bank_transaction']:
-                matched_bank_ids.add(match['bank_transaction']['index'])
-            if 'index' in match['internal_transaction']:
-                matched_internal_ids.add(match['internal_transaction']['index'])
+            bank_trans = match['bank_transaction']
+            internal_trans = match['internal_transaction']
+            
+            if 'index' in bank_trans:
+                matched_bank_ids.add(bank_trans['index'])
+            if 'index' in internal_trans:
+                matched_internal_ids.add(internal_trans['index'])
         
         # Transações apenas no banco
         bank_only = bank_df_norm[~bank_df_norm.index.isin(matched_bank_ids)]
         # Transações apenas no sistema interno
         internal_only = internal_df_norm[~internal_df_norm.index.isin(matched_internal_ids)]
         
-        # Preparar resultados
+        # Preparar resultados (convertendo timestamps)
         results['matched'] = all_matches
-        results['bank_only'] = bank_only.to_dict('records')
-        results['internal_only'] = internal_only.to_dict('records')
-        results['summary'] = {
-            'total_bank_transactions': len(bank_df_norm),
-            'total_internal_transactions': len(internal_df_norm),
-            'matched_count': len(all_matches),
-            'bank_only_count': len(bank_only),
-            'internal_only_count': len(internal_only),
-            'match_rate': len(all_matches) / max(len(bank_df_norm), len(internal_df_norm), 1)
-        }
+        results['bank_only'] = self._convert_timestamps(bank_only.to_dict('records'))
+        results['internal_only'] = self._convert_timestamps(internal_only.to_dict('records'))
+        
+        # Atualizar summary
+        results['summary']['matched_count'] = len(all_matches)
+        results['summary']['bank_only_count'] = len(bank_only)
+        results['summary']['internal_only_count'] = len(internal_only)
+        results['summary']['match_rate'] = len(all_matches) / max(len(bank_df_norm), len(internal_df_norm), 1)
         
         print(f"✅ [DEBUG] Reconciliação concluída!")
         print(f"📈 [DEBUG] Resultados: {results['summary']}")
         
         return results
-
-# Teste básico
-if __name__ == "__main__":
-    processor = ReconciliationProcessor()
-    print("✅ ReconciliationProcessor criado com sucesso!")

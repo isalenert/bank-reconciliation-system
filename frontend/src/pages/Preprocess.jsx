@@ -1,16 +1,22 @@
 import React, { useState, useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import APIService from '../services/api'
+import { useSettings } from '../context/SettingsContext' // ← NOVO
 
 const Preprocess = () => {
   const location = useLocation()
   const navigate = useNavigate()
   const { files } = location.state || {}
+  const { settings } = useSettings() // ← NOVO: Hook para acessar configurações
 
-  const [bankData, setBankData] = useState([])
-  const [systemData, setSystemData] = useState([])
+  const [file1Data, setFile1Data] = useState(null)
+  const [file2Data, setFile2Data] = useState(null)
+  const [file1Preview, setFile1Preview] = useState([])
+  const [file2Preview, setFile2Preview] = useState([])
   const [bankMapping, setBankMapping] = useState({})
   const [systemMapping, setSystemMapping] = useState({})
   const [processing, setProcessing] = useState(false)
+  const [reconciling, setReconciling] = useState(false) // ← NOVO
   const [error, setError] = useState(null)
 
   useEffect(() => {
@@ -26,84 +32,131 @@ const Preprocess = () => {
       setProcessing(true)
       setError(null)
       
-      // Processar arquivos localmente (sem backend)
-      const bankPreview = await readFilePreview(file1)
-      const systemPreview = await readFilePreview(file2)
+      console.log('🔄 Enviando arquivos para o backend...')
       
-      setBankData(bankPreview)
-      setSystemData(systemPreview)
+      // Processar arquivos usando o backend
+      const [file1Response, file2Response] = await Promise.all([
+        APIService.processFile(file1),
+        APIService.processFile(file2)
+      ])
+
+      console.log('✅ Respostas do backend:', { file1Response, file2Response })
+      
+      setFile1Data(file1Response)
+      setFile2Data(file2Response)
+      
+      // Extrair preview dos dados para exibição
+      setFile1Preview(extractPreviewData(file1Response))
+      setFile2Preview(extractPreviewData(file2Response))
       
     } catch (error) {
-      console.error('Erro ao processar arquivos:', error)
+      console.error('❌ Erro ao processar arquivos:', error)
       setError('Erro ao processar arquivos: ' + error.message)
     } finally {
       setProcessing(false)
     }
   }
 
-  const readFilePreview = (file) => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = (e) => {
-        try {
-          const content = e.target.result
-          const lines = content.split('\n').filter(line => line.trim() !== '')
-          
-          // Detectar delimitador (vírgula ou ponto-e-vírgula)
-          const firstLine = lines[0]
-          const hasSemicolon = firstLine.includes(';')
-          const delimiter = hasSemicolon ? ';' : ','
-          
-          const data = lines.slice(0, 6).map(line => {
-            const values = line.split(delimiter)
-            return values.map(value => value.trim().replace(/^"|"$/g, ''))
-          })
-          
-          resolve(data)
-        } catch (parseError) {
-          reject(parseError)
-        }
-      }
-      reader.onerror = () => reject(reader.error)
-      reader.readAsText(file)
-    })
+  const extractPreviewData = (response) => {
+    // Para CSV: usar os dados de preview
+    if (response.preview) {
+      const preview = response.preview.slice(0, 6)
+      if (preview.length === 0) return []
+      
+      const columns = response.columns || Object.keys(preview[0])
+      const headerRow = columns
+      
+      const dataRows = preview.map(row => 
+        columns.map(col => row[col] || '')
+      )
+      
+      return [headerRow, ...dataRows]
+    }
+    
+    // Para PDF: usar os dados de preview
+    if (response.preview_data) {
+      const preview = response.preview_data.slice(0, 6)
+      if (preview.length === 0) return []
+      
+      const columns = Object.keys(preview[0])
+      const headerRow = columns
+      
+      const dataRows = preview.map(row => 
+        columns.map(col => row[col] || '')
+      )
+      
+      return [headerRow, ...dataRows]
+    }
+    
+    return []
   }
 
-  const handleReconcile = () => {
-    // Verificar mapeamentos mínimos
-    const requiredFields = ['Date', 'Value', 'Description']
-    const missingBankFields = requiredFields.filter(field => bankMapping[field] === undefined)
-    const missingSystemFields = requiredFields.filter(field => systemMapping[field] === undefined)
-    
-    if (missingBankFields.length > 0) {
-      setError(`Preencha os campos obrigatórios no Arquivo 1: ${missingBankFields.join(', ')}`)
-      return
-    }
-    
-    if (missingSystemFields.length > 0) {
-      setError(`Preencha os campos obrigatórios no Arquivo 2: ${missingSystemFields.join(', ')}`)
-      return
-    }
+  const handleReconcile = async () => {
+    try {
+      setReconciling(true) // ← NOVO
+      setError(null)
 
-    navigate('/reconciliation', {
-      state: {
-        files,
-        bankData: bankData.slice(1), // Remover header
-        systemData: systemData.slice(1), // Remover header
-        columnMapping: {
-          date_col: `Column ${bankMapping.Date + 1}`,
-          value_col: `Column ${bankMapping.Value + 1}`,
-          desc_col: `Column ${bankMapping.Description + 1}`,
-          id_col: bankMapping['Optional Unique ID'] !== undefined ? 
-                  `Column ${bankMapping['Optional Unique ID'] + 1}` : 
-                  (systemMapping['Optional Unique ID'] !== undefined ? 
-                   `Column ${systemMapping['Optional Unique ID'] + 1}` : ''),
-          date_tolerance: 1,
-          value_tolerance: 0.01,
-          similarity_threshold: 0.8
-        }
+      // Verificar mapeamentos mínimos
+      const requiredFields = ['Date', 'Value', 'Description']
+      const missingBankFields = requiredFields.filter(field => bankMapping[field] === undefined)
+      const missingSystemFields = requiredFields.filter(field => systemMapping[field] === undefined)
+      
+      if (missingBankFields.length > 0) {
+        throw new Error(`Preencha os campos obrigatórios no Arquivo 1: ${missingBankFields.join(', ')}`)
       }
-    })
+      
+      if (missingSystemFields.length > 0) {
+        throw new Error(`Preencha os campos obrigatórios no Arquivo 2: ${missingSystemFields.join(', ')}`)
+      }
+
+      console.log('🔄 Iniciando conciliação...')
+      
+      // Mapear índices para nomes de colunas reais
+      const file1Columns = file1Data.columns || Object.keys(file1Data.preview?.[0] || file1Data.preview_data?.[0] || {})
+      const file2Columns = file2Data.columns || Object.keys(file2Data.preview?.[0] || file2Data.preview_data?.[0] || {})
+      
+      // ← ATUALIZADO: Usar configurações do Context
+      const config = {
+        date_col: file1Columns[bankMapping.Date],
+        value_col: file1Columns[bankMapping.Value], 
+        desc_col: file1Columns[bankMapping.Description],
+        id_col: bankMapping['Optional Unique ID'] !== undefined ? 
+                file1Columns[bankMapping['Optional Unique ID']] : '',
+        date_tolerance: settings.dateTolerance,           // Das configurações
+        value_tolerance: settings.valueTolerance,         // Das configurações
+        similarity_threshold: settings.similarityThreshold // Das configurações
+      }
+
+      console.log('📝 Configuração da conciliação:', config)
+      
+      // Chamar API de conciliação
+      const reconciliationResult = await APIService.reconcileTransactions(
+        files.file1,
+        files.file2,
+        config
+      )
+
+      console.log('✅ Resultado da conciliação:', reconciliationResult)
+
+      // Navegar para página de resultados
+      navigate('/reconciliation', {
+        state: {
+          files,
+          file1Data,
+          file2Data,
+          reconciliationResult,
+          columnMapping: config,
+          bankMapping,
+          systemMapping
+        }
+      })
+      
+    } catch (error) {
+      console.error('❌ Erro na conciliação:', error)
+      setError(error.message)
+    } finally {
+      setReconciling(false) // ← NOVO
+    }
   }
 
   const updateBankMapping = (field, value) => {
@@ -137,7 +190,8 @@ const Preprocess = () => {
           <div className="flex justify-center items-center">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-500"></div>
           </div>
-          <p className="text-gray-600 mt-4">Processando arquivos...</p>
+          <p className="text-gray-600 mt-4">Processando arquivos no backend...</p>
+          <p className="text-sm text-gray-500 mt-2">Aguarde enquanto analisamos seus dados...</p>
         </div>
       </div>
     )
@@ -145,11 +199,29 @@ const Preprocess = () => {
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      <div className="bg-white rounded-lg shadow-sm p-6">
+      <div className="bg-white rounded-lg shadow-sm p-6 border border-green-100">
         {/* Header */}
         <div className="flex items-center mb-8">
           <h1 className="text-2xl font-bold text-gray-900">Pré-processamento e Mapeamento</h1>
         </div>
+
+        {/* Success Info */}
+        {file1Data && file2Data && (
+          <div className="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="p-4 bg-green-50 rounded-lg border border-green-200">
+              <h3 className="font-semibold text-green-800">✅ Arquivo 1 Processado</h3>
+              <p className="text-sm text-green-700">
+                {file1Data.filename} - {file1Data.row_count || file1Data.transactions_count || 0} linhas
+              </p>
+            </div>
+            <div className="p-4 bg-green-50 rounded-lg border border-green-200">
+              <h3 className="font-semibold text-green-800">✅ Arquivo 2 Processado</h3>
+              <p className="text-sm text-green-700">
+                {file2Data.filename} - {file2Data.row_count || file2Data.transactions_count || 0} linhas
+              </p>
+            </div>
+          </div>
+        )}
 
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
@@ -173,20 +245,18 @@ const Preprocess = () => {
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Arquivo 1: Extrato Bancário</h2>
             <p className="text-sm text-gray-600 mb-4">({files.file1.name})</p>
             
-            {bankData.length > 0 ? (
+            {file1Preview.length > 0 ? (
               <div className="bg-gray-50 border border-green-200 rounded-lg overflow-hidden">
-                {/* Table Header */}
                 <div className="bg-gray-100 grid grid-cols-6 text-sm font-medium text-gray-700">
                   <div className="p-3 border-r border-gray-200">Linha</div>
-                  {bankData[0]?.map((_, index) => (
+                  {file1Preview[0]?.map((_, index) => (
                     <div key={index} className="p-3 border-r border-gray-200">
                       Coluna {index + 1}
                     </div>
                   )).slice(0, 5)}
                 </div>
 
-                {/* Table Rows */}
-                {bankData.map((row, index) => (
+                {file1Preview.map((row, index) => (
                   <div key={index} className="grid grid-cols-6 text-sm border-t border-gray-200">
                     <div className="p-3 border-r border-gray-200 text-gray-600 bg-gray-50">{index + 1}</div>
                     {row.map((cell, cellIndex) => (
@@ -203,7 +273,6 @@ const Preprocess = () => {
               </div>
             )}
 
-            {/* Mapping Section */}
             <div className="mt-6">
               <h3 className="text-md font-semibold text-gray-900 mb-4">Mapear Colunas</h3>
               
@@ -219,15 +288,15 @@ const Preprocess = () => {
                       onChange={(e) => updateBankMapping(field, e.target.value)}
                     >
                       <option value="">Selecionar</option>
-                      {bankData[0]?.map((_, index) => (
+                      {file1Preview[0]?.map((_, index) => (
                         <option key={index} value={index}>
                           Coluna {index + 1}
                         </option>
                       ))}
                     </select>
-                    {bankMapping[field] !== undefined && bankData[0]?.[bankMapping[field]] && (
+                    {bankMapping[field] !== undefined && file1Preview[0]?.[bankMapping[field]] && (
                       <p className="text-sm text-green-600 mt-1">
-                        Exemplo: {bankData[0][bankMapping[field]]}
+                        Exemplo: {file1Preview[0][bankMapping[field]]}
                       </p>
                     )}
                   </div>
@@ -241,20 +310,18 @@ const Preprocess = () => {
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Arquivo 2: Sistema Interno</h2>
             <p className="text-sm text-gray-600 mb-4">({files.file2.name})</p>
             
-            {systemData.length > 0 ? (
+            {file2Preview.length > 0 ? (
               <div className="bg-gray-50 border border-green-200 rounded-lg overflow-hidden">
-                {/* Table Header */}
                 <div className="bg-gray-100 grid grid-cols-6 text-sm font-medium text-gray-700">
                   <div className="p-3 border-r border-gray-200">Linha</div>
-                  {systemData[0]?.map((_, index) => (
+                  {file2Preview[0]?.map((_, index) => (
                     <div key={index} className="p-3 border-r border-gray-200">
                       Coluna {index + 1}
                     </div>
                   )).slice(0, 5)}
                 </div>
 
-                {/* Table Rows */}
-                {systemData.map((row, index) => (
+                {file2Preview.map((row, index) => (
                   <div key={index} className="grid grid-cols-6 text-sm border-t border-gray-200">
                     <div className="p-3 border-r border-gray-200 text-gray-600 bg-gray-50">{index + 1}</div>
                     {row.map((cell, cellIndex) => (
@@ -271,7 +338,6 @@ const Preprocess = () => {
               </div>
             )}
 
-            {/* Mapping Section */}
             <div className="mt-6">
               <h3 className="text-md font-semibold text-gray-900 mb-4">Mapear Colunas</h3>
               
@@ -287,15 +353,15 @@ const Preprocess = () => {
                       onChange={(e) => updateSystemMapping(field, e.target.value)}
                     >
                       <option value="">Selecionar</option>
-                      {systemData[0]?.map((_, index) => (
+                      {file2Preview[0]?.map((_, index) => (
                         <option key={index} value={index}>
                           Coluna {index + 1}
                         </option>
                       ))}
                     </select>
-                    {systemMapping[field] !== undefined && systemData[0]?.[systemMapping[field]] && (
+                    {systemMapping[field] !== undefined && file2Preview[0]?.[systemMapping[field]] && (
                       <p className="text-sm text-green-600 mt-1">
-                        Exemplo: {systemData[0][systemMapping[field]]}
+                        Exemplo: {file2Preview[0][systemMapping[field]]}
                       </p>
                     )}
                   </div>
@@ -309,7 +375,7 @@ const Preprocess = () => {
         <div className="flex justify-between mt-8 pt-6 border-t border-gray-200">
           <button
             onClick={() => navigate('/import')}
-            className="px-6 py-3 bg-gray-500 text-white rounded-lg font-semibold hover:bg-gray-600"
+            className="px-6 py-3 bg-gray-500 text-white rounded-lg font-semibold hover:bg-gray-600 transition-colors"
           >
             Voltar
           </button>
@@ -317,6 +383,7 @@ const Preprocess = () => {
           <button
             onClick={handleReconcile}
             disabled={
+              reconciling ||
               bankMapping.Date === undefined || 
               bankMapping.Value === undefined || 
               bankMapping.Description === undefined ||
@@ -324,9 +391,16 @@ const Preprocess = () => {
               systemMapping.Value === undefined || 
               systemMapping.Description === undefined
             }
-            className="px-8 py-3 bg-green-500 text-white rounded-lg font-semibold hover:bg-green-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-lg"
+            className="px-8 py-3 bg-green-500 text-white rounded-lg font-semibold hover:bg-green-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-lg transition-colors flex items-center"
           >
-            Conciliação
+            {reconciling ? (
+              <>
+                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
+                Processando...
+              </>
+            ) : (
+              'Iniciar Conciliação'
+            )}
           </button>
         </div>
       </div>

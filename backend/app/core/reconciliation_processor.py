@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from fuzzywuzzy import fuzz
 import Levenshtein
 import json
+from typing import Dict, List, Tuple, Any
 
 class ReconciliationProcessor:
     def __init__(self, date_tolerance_days: int = 1, value_tolerance: float = 0.01, similarity_threshold: float = 0.8):
